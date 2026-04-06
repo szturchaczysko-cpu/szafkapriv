@@ -31,7 +31,7 @@ def init_services():
         firebase_admin.initialize_app(cred)
     db = firestore.client()
 
-    # Vertex AI (Zostawiamy do generowania tagów tekstowych)
+    # Vertex AI
     vertex_creds = service_account.Credentials.from_service_account_info(creds_dict)
     vertexai.init(
         project=st.secrets.get("GCP_PROJECT_ID", "roboczy-bez-limitu"),
@@ -100,7 +100,7 @@ with tab_przeglad:
                 st.divider()
 
 # ==========================================
-# ZAKŁADKA 2: DODAJ (Auto-Tagger BOGATY O DETALE)
+# ZAKŁADKA 2: DODAJ (Auto-Tagger)
 # ==========================================
 with tab_dodaj:
     st.subheader("Dodaj nowe ubrania do kartoteki")
@@ -150,12 +150,12 @@ with tab_dodaj:
                             "image_path": local_path
                         })
                         
-                        st.toast(f"✅ Dodano pomyślnie {uploaded_file.name}! Wykryto: {tags.get('typ_szczegolowy')}")
+                        st.toast(f"✅ Dodano pomyślnie {uploaded_file.name}!")
                         
                     except Exception as e:
                         st.error(f"Błąd podczas analizy/zapisu {uploaded_file.name}: {e}")
 
-            st.success("Wszystkie zdjęcia zostały głęboko przeanalizowane i dodane! Odświeżam szafę...")
+            st.success("Wszystkie zdjęcia dodane! Odświeżam szafę...")
             time.sleep(1.5)
             st.rerun()
 
@@ -166,13 +166,18 @@ with tab_dodaj:
                 st.image(file, caption=file.name, use_container_width=True)
 
 # ==========================================
-# ZAKŁADKA 3: DOBIERZ I WIZUALIZUJ (HYBRYDA Z GEMINI CHAT)
+# ZAKŁADKA 3: DOBIERZ I WIZUALIZUJ
 # ==========================================
 with tab_dobierz:
     st.subheader("Wirtualny Stylista i Wizualizacja")
     
     st.markdown("#### 1. Zdjęcie bazowe Magdy")
-    base_image = st.file_uploader("Wgraj zdjęcie Magdy (sylwetka)", type=["jpg", "png", "jpeg"], key="base_img")
+    base_image_upload = st.file_uploader("Wgraj zdjęcie Magdy (sylwetka)", type=["jpg", "png", "jpeg"], key="base_img_uploader")
+    
+    # TWARDY ZAPIS DO PAMIĘCI - to naprawia znikające zdjęcia!
+    if base_image_upload is not None:
+        st.session_state['base_img_bytes'] = base_image_upload.getvalue()
+        st.success("✅ Zdjęcie bazowe zapisane w pamięci!")
     
     st.markdown("#### 2. Dobór ubrań z szafy")
     okazja = st.text_input("Opisz okazję (np. biuro, 15 stopni, chcę ubrać coś skórzanego):")
@@ -208,17 +213,17 @@ with tab_dobierz:
         vto_descriptions = ""
         valid_images = []
         
-        # --- ZMIANA: Twarde wczytywanie zdjęcia bazowego Magdy jako pierwszego obrazu ---
-        if base_image is not None:
+        # --- BEZPIECZNE WCZYTYWANIE Z PAMIĘCI ---
+        if 'base_img_bytes' in st.session_state:
             try:
-                base_image.seek(0) # Resetujemy wskaźnik strumienia
-                img_bytes = base_image.read()
-                base_img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                base_img_pil = Image.open(io.BytesIO(st.session_state['base_img_bytes'])).convert("RGB")
                 valid_images.append(base_img_pil)
             except Exception as e:
-                st.warning(f"Wystąpił błąd podczas ładowania zdjęcia bazowego: {e}")
+                st.error(f"Błąd odczytu zdjęcia bazowego: {e}")
+        else:
+            st.warning("⚠️ UWAGA: Brakuje zdjęcia bazowego Magdy! Wróć do Kroku 1 i wgraj sylwetkę, aby dodać ją do kolarzu.")
 
-        # Zbieranie obrazów ubrań do kolarzu i wyświetlanie ich w UI
+        # Zbieranie obrazów ubrań
         for i, item in enumerate(st.session_state.selected_items):
             with cols[i]:
                 if os.path.exists(item.get("image_path", "")):
@@ -246,19 +251,20 @@ with tab_dobierz:
             x_offset = 0
             draw = ImageDraw.Draw(collage)
             
+            # Flaga sprawdzająca, czy mamy zdjęcie bazowe
+            has_base_image = 'base_img_bytes' in st.session_state
+            
             for idx, img in enumerate(resized_images):
                 collage.paste(img, (x_offset, 0))
                 x_offset += img.width + 20
                 
-                # Dodajemy pionową, czarną linię oddzielającą zdjęcie sylwetki od ubrań
-                if idx == 0 and base_image is not None and len(resized_images) > 1:
+                # Dodajemy pionową linię tylko jeśli na 100% mamy zdjęcie bazowe na pierwszej pozycji
+                if idx == 0 and has_base_image and len(resized_images) > 1:
                     line_x = x_offset - 10
                     draw.line([(line_x, 0), (line_x, target_height)], fill="black", width=4)
             
-            # Wyświetlanie kolarzu w UI
-            st.image(collage, caption="Twój gotowy zestaw ze zdjęciem bazowym (przedzielony linią)", use_container_width=True)
+            st.image(collage, caption="Twój gotowy zestaw", use_container_width=True)
             
-            # Przekształcanie kolarzu na bajty do pobrania
             buf = io.BytesIO()
             collage.save(buf, format="JPEG")
             byte_im = buf.getvalue()

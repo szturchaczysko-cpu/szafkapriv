@@ -16,22 +16,19 @@ st.set_page_config(page_title="Wirtualna Szafa Magdy", layout="wide", page_icon=
 
 IMAGE_DIR = "wardrobe_images"
 os.makedirs(IMAGE_DIR, exist_ok=True)
+BASE_IMG_PATH = os.path.join(IMAGE_DIR, "magda_base.jpg") # Stała ścieżka dla sylwetki Magdy
 
 # --- 2. INICJALIZACJA BAZY I VERTEX AI ---
 @st.cache_resource
 def init_services():
     creds_dict = json.loads(st.secrets["FIREBASE_CREDS"])
-    
-    # Naprawiamy znaki nowej linii w kluczu prywatnym
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     
-    # Firebase
     if not firebase_admin._apps:
         cred = credentials.Certificate(creds_dict)
         firebase_admin.initialize_app(cred)
     db = firestore.client()
 
-    # Vertex AI
     vertex_creds = service_account.Credentials.from_service_account_info(creds_dict)
     vertexai.init(
         project=st.secrets.get("GCP_PROJECT_ID", "roboczy-bez-limitu"),
@@ -150,20 +147,14 @@ with tab_dodaj:
                             "image_path": local_path
                         })
                         
-                        st.toast(f"✅ Dodano pomyślnie {uploaded_file.name}!")
+                        st.toast(f"✅ Dodano pomyślnie {uploaded_file.name}! Wykryto: {tags.get('typ_szczegolowy')}")
                         
                     except Exception as e:
                         st.error(f"Błąd podczas analizy/zapisu {uploaded_file.name}: {e}")
 
-            st.success("Wszystkie zdjęcia dodane! Odświeżam szafę...")
+            st.success("Wszystkie zdjęcia zostały głęboko przeanalizowane i dodane! Odświeżam szafę...")
             time.sleep(1.5)
             st.rerun()
-
-        st.markdown("#### Podgląd wybranych zdjęć:")
-        cols = st.columns(4)
-        for i, file in enumerate(uploaded_files):
-            with cols[i % 4]:
-                st.image(file, caption=file.name, use_container_width=True)
 
 # ==========================================
 # ZAKŁADKA 3: DOBIERZ I WIZUALIZUJ
@@ -171,120 +162,132 @@ with tab_dodaj:
 with tab_dobierz:
     st.subheader("Wirtualny Stylista i Wizualizacja")
     
+    # --- PANCERNE ZDJĘCIE BAZOWE MAGDY ---
     st.markdown("#### 1. Zdjęcie bazowe Magdy")
-    base_image_upload = st.file_uploader("Wgraj zdjęcie Magdy (sylwetka)", type=["jpg", "png", "jpeg"], key="base_img_uploader")
     
-    # TWARDY ZAPIS DO PAMIĘCI - to naprawia znikające zdjęcia!
-    if base_image_upload is not None:
-        st.session_state['base_img_bytes'] = base_image_upload.getvalue()
-        st.success("✅ Zdjęcie bazowe zapisane w pamięci!")
+    if os.path.exists(BASE_IMG_PATH):
+        st.success("✅ Zdjęcie bazowe jest wczytane. System będzie go używał do każdego kolarzu.")
+        col_b1, col_b2 = st.columns([1, 4])
+        with col_b1:
+            st.image(BASE_IMG_PATH, width=150)
+        with col_b2:
+            if st.button("🗑️ Zmień zdjęcie sylwetki"):
+                os.remove(BASE_IMG_PATH)
+                st.rerun()
+    else:
+        st.warning("⚠️ Najpierw wgraj swoje stałe zdjęcie referencyjne (twarz + sylwetka). Zrobić to musisz tylko raz!")
+        base_uploader = st.file_uploader("Wgraj zdjęcie:", type=["jpg", "png", "jpeg"])
+        if base_uploader:
+            with open(BASE_IMG_PATH, "wb") as f:
+                f.write(base_uploader.getbuffer())
+            st.success("Zapisano! Odświeżam...")
+            time.sleep(1)
+            st.rerun()
     
-    st.markdown("#### 2. Dobór ubrań z szafy")
-    okazja = st.text_input("Opisz okazję (np. biuro, 15 stopni, chcę ubrać coś skórzanego):")
-    
-    if okazja:
-        if st.button("✨ Dobierz zestaw z bazy", type="primary"):
-            with st.spinner("AI wybiera ubrania..."):
-                items_ref = db.collection("wardrobe_items").stream()
-                wardrobe_data = [{"id": doc.id, **doc.to_dict()} for doc in items_ref]
-                
-                if not wardrobe_data:
-                    st.error("Szafa jest pusta!")
-                else:
-                    model_text = GenerativeModel("gemini-2.5-pro")
-                    prompt_wybor = f"""
-                    Masz następującą szafę (JSON metadane): {json.dumps(wardrobe_data)}
-                    Okazja zgłoszona przez użytkownika: {okazja}.
-                    Twoim zadaniem jest skomponowanie najlepszego zestawu ubrań na tę okazję. Zestaw powinien zawierać 2-4 logicznie pasujące elementy (np. góra, dół, buty).
-                    Zwróć WYŁĄCZNIE czysty JSON (lista ID wybranych ubrań), np: ["id1", "id2", "id3"]
-                    """
-                    resp = model_text.generate_content(prompt_wybor)
-                    try:
-                        selected_ids = json.loads(resp.text.replace("```json", "").replace("```", "").strip())
-                        st.session_state.selected_items = [i for i in wardrobe_data if i['id'] in selected_ids]
-                        st.success("Zestaw dobrany!")
-                    except:
-                        st.error("Błąd w parsowaniu wyboru AI.")
+    # Zabezpieczenie: Nie pozwalamy dobierać ubrań bez wgranego zdjęcia bazowego
+    if os.path.exists(BASE_IMG_PATH):
+        st.markdown("#### 2. Dobór ubrań z szafy")
+        okazja = st.text_input("Opisz okazję (np. biuro, 15 stopni, chcę ubrać coś skórzanego):")
+        
+        if okazja:
+            if st.button("✨ Dobierz zestaw z bazy", type="primary"):
+                with st.spinner("AI wybiera ubrania..."):
+                    items_ref = db.collection("wardrobe_items").stream()
+                    wardrobe_data = [{"id": doc.id, **doc.to_dict()} for doc in items_ref]
+                    
+                    if not wardrobe_data:
+                        st.error("Szafa jest pusta!")
+                    else:
+                        model_text = GenerativeModel("gemini-2.5-pro")
+                        prompt_wybor = f"""
+                        Masz następującą szafę (JSON metadane): {json.dumps(wardrobe_data)}
+                        Okazja zgłoszona przez użytkownika: {okazja}.
+                        Twoim zadaniem jest skomponowanie najlepszego zestawu ubrań na tę okazję. Zestaw powinien zawierać 2-4 logicznie pasujące elementy (np. góra, dół, buty).
+                        Zwróć WYŁĄCZNIE czysty JSON (lista ID wybranych ubrań), np: ["id1", "id2", "id3"]
+                        """
+                        resp = model_text.generate_content(prompt_wybor)
+                        try:
+                            selected_ids = json.loads(resp.text.replace("```json", "").replace("```", "").strip())
+                            st.session_state.selected_items = [i for i in wardrobe_data if i['id'] in selected_ids]
+                            st.success("Zestaw dobrany!")
+                        except:
+                            st.error("Błąd w parsowaniu wyboru AI.")
 
-    if "selected_items" in st.session_state and st.session_state.selected_items:
-        st.markdown("#### Wybrany zestaw:")
-        cols = st.columns(len(st.session_state.selected_items))
-        
-        vto_descriptions = ""
-        valid_images = []
-        
-        # --- BEZPIECZNE WCZYTYWANIE Z PAMIĘCI ---
-        if 'base_img_bytes' in st.session_state:
+        if "selected_items" in st.session_state and st.session_state.selected_items:
+            st.markdown("#### Wybrany zestaw:")
+            cols = st.columns(len(st.session_state.selected_items))
+            
+            vto_descriptions = ""
+            valid_images = []
+            
+            # 1. NAJPIERW TWARDO ŁADUJEMY ZDJĘCIE BAZOWE Z DYSKU
             try:
-                base_img_pil = Image.open(io.BytesIO(st.session_state['base_img_bytes'])).convert("RGB")
+                base_img_pil = Image.open(BASE_IMG_PATH).convert("RGB")
                 valid_images.append(base_img_pil)
             except Exception as e:
-                st.error(f"Błąd odczytu zdjęcia bazowego: {e}")
-        else:
-            st.warning("⚠️ UWAGA: Brakuje zdjęcia bazowego Magdy! Wróć do Kroku 1 i wgraj sylwetkę, aby dodać ją do kolarzu.")
+                st.error(f"Nie mogłem wczytać zdjęcia bazowego z dysku: {e}")
 
-        # Zbieranie obrazów ubrań
-        for i, item in enumerate(st.session_state.selected_items):
-            with cols[i]:
-                if os.path.exists(item.get("image_path", "")):
-                    st.image(item["image_path"], width=150)
-                    valid_images.append(Image.open(item["image_path"]).convert("RGB"))
-                st.caption(f"{item.get('typ_szczegolowy', '')}")
-            vto_descriptions += f"- {item.get('opis_dla_vto', item.get('typ_szczegolowy', ''))}\n"
+            # 2. POTEM DODAJEMY UBRANIA
+            for i, item in enumerate(st.session_state.selected_items):
+                with cols[i]:
+                    if os.path.exists(item.get("image_path", "")):
+                        st.image(item["image_path"], width=150)
+                        valid_images.append(Image.open(item["image_path"]).convert("RGB"))
+                    st.caption(f"{item.get('typ_szczegolowy', '')}")
+                vto_descriptions += f"- {item.get('opis_dla_vto', item.get('typ_szczegolowy', ''))}\n"
+                    
+            st.markdown("---")
+            st.markdown("#### 3. Kolarz i Eksport do Gemini")
+            st.info("Pobierz ten kolarz, skopiuj prompt i wklej je prosto do czatu Gemini!")
+
+            # Sklejanie obrazów w kolarz (Pillow)
+            if valid_images:
+                target_height = 400
+                resized_images = []
+                for img in valid_images:
+                    aspect_ratio = img.width / img.height
+                    new_width = int(target_height * aspect_ratio)
+                    resized_images.append(img.resize((new_width, target_height)))
+
+                total_width = sum(img.width for img in resized_images) + (20 * (len(resized_images) - 1))
+                collage = Image.new('RGB', (total_width, target_height), color=(255, 255, 255))
                 
-        st.markdown("---")
-        st.markdown("#### 3. Kolarz i Eksport do Gemini")
-        st.info("Pobierz ten kolarz, skopiuj prompt i wklej je prosto do czatu Gemini!")
-
-        # Sklejanie obrazów w kolarz (Pillow)
-        if valid_images:
-            target_height = 400
-            resized_images = []
-            for img in valid_images:
-                aspect_ratio = img.width / img.height
-                new_width = int(target_height * aspect_ratio)
-                resized_images.append(img.resize((new_width, target_height)))
-
-            total_width = sum(img.width for img in resized_images) + (20 * (len(resized_images) - 1))
-            collage = Image.new('RGB', (total_width, target_height), color=(255, 255, 255))
-            
-            x_offset = 0
-            draw = ImageDraw.Draw(collage)
-            
-            # Flaga sprawdzająca, czy mamy zdjęcie bazowe
-            has_base_image = 'base_img_bytes' in st.session_state
-            
-            for idx, img in enumerate(resized_images):
-                collage.paste(img, (x_offset, 0))
-                x_offset += img.width + 20
+                x_offset = 0
+                draw = ImageDraw.Draw(collage)
                 
-                # Dodajemy pionową linię tylko jeśli na 100% mamy zdjęcie bazowe na pierwszej pozycji
-                if idx == 0 and has_base_image and len(resized_images) > 1:
-                    line_x = x_offset - 10
-                    draw.line([(line_x, 0), (line_x, target_height)], fill="black", width=4)
-            
-            st.image(collage, caption="Twój gotowy zestaw", use_container_width=True)
-            
-            buf = io.BytesIO()
-            collage.save(buf, format="JPEG")
-            byte_im = buf.getvalue()
-            
-            st.download_button(
-                label="📥 Pobierz Gotowy Kolarz",
-                data=byte_im,
-                file_name="moj_zestaw_na_dzis.jpg",
-                mime="image/jpeg",
-                type="primary"
-            )
-            
-            st.markdown("##### 📋 Gotowy Prompt dla Gemini (Skopiuj to):")
-            
-            gemini_prompt = f"""Hej Gemini! Wygeneruj mi wizualizację typu Virtual Try-On.
-Wgrywam Ci jeden zbiorczy obraz. Po lewej stronie (oddzielone czarną linią) znajduje się moje zdjęcie bazowe (twarz i sylwetka), a po prawej ubrania, które chcę na siebie założyć.
+                for idx, img in enumerate(resized_images):
+                    collage.paste(img, (x_offset, 0))
+                    x_offset += img.width + 20
+                    
+                    # Czarna pionowa linia po zdjęciu Magdy (indeks 0 to zawsze Magda)
+                    if idx == 0 and len(resized_images) > 1:
+                        line_x = x_offset - 10
+                        draw.line([(line_x, 0), (line_x, target_height)], fill="black", width=6)
+                
+                # Wyświetlanie kolarzu w UI
+                st.image(collage, caption="Twój gotowy zestaw ze zdjęciem bazowym (przedzielony linią)", use_container_width=True)
+                
+                # Przekształcanie kolarzu na bajty do pobrania
+                buf = io.BytesIO()
+                collage.save(buf, format="JPEG")
+                byte_im = buf.getvalue()
+                
+                st.download_button(
+                    label="📥 Pobierz Gotowy Kolarz",
+                    data=byte_im,
+                    file_name="moj_zestaw_na_dzis.jpg",
+                    mime="image/jpeg",
+                    type="primary"
+                )
+                
+                st.markdown("##### 📋 Gotowy Prompt dla Gemini (Skopiuj to):")
+                
+                gemini_prompt = f"""Hej Gemini! Wygeneruj mi wizualizację typu Virtual Try-On.
+Wgrywam Ci jeden zbiorczy obraz. Po lewej stronie (oddzielone grubą, czarną linią) znajduje się moje zdjęcie bazowe (twarz i sylwetka), a po prawej ubrania, które chcę na siebie założyć.
 
-Proszę, użyj swojego modelu graficznego (Nano Banana 2 / Flash Image), aby ubrać mnie dokładnie w te rzeczy z kolarzu. Zachowaj moją twarz, fryzurę i proporcje. Zwróć maksymalną uwagę na te kluczowe detale ubrań:
+Proszę, użyj swojego modelu graficznego (Nano Banana 2 / Flash Image), aby ubrać mnie dokładnie w te rzeczy z kolarzu. Zachowaj moją twarz, fryzurę i proporcje ciała z lewej strony zdjęcia. Zwróć maksymalną uwagę na te kluczowe detale ubrań z prawej strony:
 {vto_descriptions}
 
 Obraz ma wyglądać jak profesjonalne zdjęcie w naturalnym otoczeniu, bez zniekształceń proporcji ubrań."""
 
-            st.code(gemini_prompt, language="text")
+                st.code(gemini_prompt, language="text")

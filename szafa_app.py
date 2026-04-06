@@ -29,11 +29,11 @@ def init_services():
         firebase_admin.initialize_app(cred)
     db = firestore.client()
 
-    # Vertex AI
+    # Vertex AI - FIX LOKALIZACJI: Zmieniono na 'us-central1' dla modeli Imagen
     vertex_creds = service_account.Credentials.from_service_account_info(creds_dict)
     vertexai.init(
         project=st.secrets.get("GCP_PROJECT_ID", "roboczy-bez-limitu"),
-        location=st.secrets.get("GCP_LOCATION", "global"),
+        location="us-central1",  # <--- TUTAJ JEST FIX
         credentials=vertex_creds
     )
     return db
@@ -120,7 +120,7 @@ with tab_dodaj:
                         model = GenerativeModel("gemini-2.5-flash")
                         image_part = Part.from_data(uploaded_file.getvalue(), mime_type=uploaded_file.type)
                         
-                        # NOWY, ZAAWANSOWANY PROMPT EKSPERCKI
+                        # ZAAWANSOWANY PROMPT EKSPERCKI
                         prompt = """
                         Jesteś ekspertem modowym. Zbadaj dokładnie to ubranie/buty z dbałością o najwyższe detale.
                         Zwróć WYŁĄCZNIE czysty JSON bez znaczników markdown, o następującej strukturze:
@@ -205,7 +205,6 @@ with tab_dobierz:
         st.markdown("#### Wybrany zestaw:")
         cols = st.columns(len(st.session_state.selected_items))
         
-        # Przygotowanie bogatych opisów do modelu VTO
         vto_descriptions = ""
         for i, item in enumerate(st.session_state.selected_items):
             with cols[i]:

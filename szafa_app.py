@@ -159,13 +159,22 @@ with tab_dodaj:
             time.sleep(1.5)
             st.rerun()
 
+        st.markdown("#### Podgląd wybranych zdjęć:")
+        cols = st.columns(4)
+        for i, file in enumerate(uploaded_files):
+            with cols[i % 4]:
+                st.image(file, caption=file.name, use_container_width=True)
+
 # ==========================================
 # ZAKŁADKA 3: DOBIERZ I WIZUALIZUJ (HYBRYDA Z GEMINI CHAT)
 # ==========================================
 with tab_dobierz:
     st.subheader("Wirtualny Stylista i Wizualizacja")
     
-    st.markdown("#### 1. Dobór ubrań z szafy")
+    st.markdown("#### 1. Zdjęcie bazowe Magdy")
+    base_image = st.file_uploader("Wgraj zdjęcie Magdy (sylwetka)", type=["jpg", "png"], key="base_img")
+    
+    st.markdown("#### 2. Dobór ubrań z szafy")
     okazja = st.text_input("Opisz okazję (np. biuro, 15 stopni, chcę ubrać coś skórzanego):")
     
     if okazja:
@@ -199,7 +208,15 @@ with tab_dobierz:
         vto_descriptions = ""
         valid_images = []
         
-        # Wyświetlanie miniaturek i zbieranie obrazów do kolarzu
+        # --- ZMIANA: Dodajemy zdjęcie bazowe Magdy jako pierwsze do listy obrazów ---
+        if base_image is not None:
+            try:
+                base_img_pil = Image.open(base_image)
+                valid_images.append(base_img_pil)
+            except Exception as e:
+                st.warning("Nie udało się dodać zdjęcia bazowego do kolarzu.")
+
+        # Wyświetlanie miniaturek w UI i zbieranie obrazów ubrań do kolarzu
         for i, item in enumerate(st.session_state.selected_items):
             with cols[i]:
                 if os.path.exists(item.get("image_path", "")):
@@ -209,8 +226,8 @@ with tab_dobierz:
             vto_descriptions += f"- {item.get('opis_dla_vto', item.get('typ_szczegolowy', ''))}\n"
                 
         st.markdown("---")
-        st.markdown("#### 2. Kolarz i Eksport do Gemini")
-        st.info("Pobierz ten kolarz, zrób kopiuj-wklej promptu i wyślij je do czatu Gemini (razem ze swoim zdjęciem), aby zobaczyć fotorealistyczną przymiarkę!")
+        st.markdown("#### 3. Kolarz i Eksport do Gemini")
+        st.info("Pobierz ten kolarz, zrób kopiuj-wklej promptu i wyślij je do czatu Gemini, aby zobaczyć fotorealistyczną przymiarkę!")
 
         # Sklejanie obrazów w kolarz (Pillow)
         if valid_images:
@@ -231,8 +248,8 @@ with tab_dobierz:
                 collage.paste(img, (x_offset, 0))
                 x_offset += img.width + 20 # Przesunięcie z marginesem
             
-            # Wyświetlanie kolarzu
-            st.image(collage, caption="Twój gotowy zestaw", use_container_width=True)
+            # Wyświetlanie kolarzu w UI
+            st.image(collage, caption="Twój gotowy zestaw ze zdjęciem bazowym", use_container_width=True)
             
             # Przekształcanie kolarzu na bajty do pobrania
             buf = io.BytesIO()
@@ -240,7 +257,7 @@ with tab_dobierz:
             byte_im = buf.getvalue()
             
             st.download_button(
-                label="📥 Pobierz Kolarz Zestawu",
+                label="📥 Pobierz Gotowy Kolarz",
                 data=byte_im,
                 file_name="moj_zestaw_na_dzis.jpg",
                 mime="image/jpeg",
@@ -250,9 +267,7 @@ with tab_dobierz:
             st.markdown("##### 📋 Gotowy Prompt dla Gemini (Skopiuj to):")
             
             gemini_prompt = f"""Hej Gemini! Wygeneruj mi wizualizację typu Virtual Try-On.
-Wgrywam Ci dwa zdjęcia:
-1. Moje zdjęcie bazowe (twarz i sylwetka).
-2. Kolarz ubrań, które chcę na siebie założyć.
+Wgrywam Ci jeden zbiorczy obraz. Po lewej stronie znajduje się moje zdjęcie bazowe (twarz i sylwetka), a obok niego są ubrania, które chcę na siebie założyć.
 
 Proszę, użyj swojego modelu graficznego (Nano Banana 2 / Flash Image), aby ubrać mnie dokładnie w te rzeczy z kolarzu. Zachowaj moją twarz, fryzurę i proporcje. Zwróć maksymalną uwagę na te kluczowe detale ubrań:
 {vto_descriptions}

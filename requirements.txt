@@ -4,3 +4,4 @@ firebase-admin
 pandas
 google-cloud-aiplatform
 pillow
+requests

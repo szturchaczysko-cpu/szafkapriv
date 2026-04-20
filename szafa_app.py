@@ -27,14 +27,16 @@ def init_services():
     creds_dict = json.loads(st.secrets["FIREBASE_CREDS"])
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     
-    # Inicjalizacja z Twoim nowym zasobnikiem Google Cloud Storage
+    # Inicjalizacja samej aplikacji bez podawania domyślnego magazynu
     if not firebase_admin._apps:
         cred = credentials.Certificate(creds_dict)
-        firebase_admin.initialize_app(cred, {
-            'storageBucket': "szafa-magdy-zdjecia-2026"
-        })
+        firebase_admin.initialize_app(cred)
+        
     db = firestore.client()
-    bucket = storage.bucket() 
+    
+    # --- PANCERNE WSKAZANIE MAGAZYNU ---
+    # Wymuszamy połączenie z konkretnym zasobnikiem, ignorując stary cache!
+    bucket = storage.bucket("szafa-magdy-zdjecia-2026") 
 
     vertex_creds = service_account.Credentials.from_service_account_info(creds_dict)
     vertexai.init(
@@ -54,7 +56,6 @@ if not st.session_state.password_correct:
     st.header("👗 Wirtualna Szafa — Logowanie")
     pwd = st.text_input("Hasło dostępu:", type="password")
     if st.button("Zaloguj"):
-        # Używamy hasła z Twoich sekretów
         if pwd == st.secrets.get("ADMIN_PASSWORD", "magda277"):
             st.session_state.password_correct = True
             st.rerun()
@@ -91,10 +92,9 @@ with tab_przeglad:
                     
                     if image_url.startswith("http"):
                         try:
-                            # Wyciągnięcie nazwy pliku z podpisanego URL
                             blob_name = image_url.split("?")[0].split("/")[-1]
-                            blob = bucket.blob(f"wardrobe_images/{blob_name}")
-                            blob.delete()
+                            blob_to_delete = bucket.blob(f"wardrobe_images/{blob_name}")
+                            blob_to_delete.delete()
                         except:
                             pass
                     db.collection("wardrobe_items").document(doc.id).delete()
@@ -135,8 +135,8 @@ with tab_przeglad:
                     if image_url.startswith("http"):
                         try:
                             blob_name = image_url.split("?")[0].split("/")[-1]
-                            blob = bucket.blob(f"wardrobe_images/{blob_name}")
-                            blob.delete()
+                            blob_to_delete = bucket.blob(f"wardrobe_images/{blob_name}")
+                            blob_to_delete.delete()
                         except:
                             pass
                     st.rerun()
@@ -158,10 +158,10 @@ with tab_dodaj:
                         file_ext = uploaded_file.name.split('.')[-1]
                         
                         # Upload do Google Cloud Storage
-                        blob = bucket.blob(f"wardrobe_images/{file_id}.{file_ext}")
-                        blob.upload_from_string(uploaded_file.getvalue(), content_type=uploaded_file.type)
+                        new_blob = bucket.blob(f"wardrobe_images/{file_id}.{file_ext}")
+                        new_blob.upload_from_string(uploaded_file.getvalue(), content_type=uploaded_file.type)
                         # Link ważny 100 lat
-                        image_url = blob.generate_signed_url(expiration=datetime.timedelta(days=36500))
+                        image_url = new_blob.generate_signed_url(expiration=datetime.timedelta(days=36500))
                             
                         # Analiza Gemini
                         model = GenerativeModel("gemini-2.5-flash")
@@ -242,33 +242,38 @@ with tab_dobierz:
                 with cols[i]:
                     url = item.get("image_path", "")
                     st.image(url, width=150)
-                    resp = requests.get(url)
-                    valid_images.append(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+                    try:
+                        resp = requests.get(url)
+                        valid_images.append(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+                    except Exception as e:
+                        st.error("Nie udało się pobrać zdjęcia do kolarzu.")
                     vto_desc += f"- {item.get('opis_dla_vto', '')}\n"
             
             st.markdown("---")
-            # GENEROWANIE KOLARZU
-            target_h = 400
-            resized = []
-            for img in valid_images:
-                new_w = int(target_h * (img.width / img.height))
-                resized.append(img.resize((new_w, target_h)))
             
-            total_w = sum(i.width for i in resized) + (20 * (len(resized)-1))
-            collage = Image.new('RGB', (total_width, target_h), (255, 255, 255))
-            curr_x = 0
-            draw = ImageDraw.Draw(collage)
-            for idx, img in enumerate(resized):
-                collage.paste(img, (curr_x, 0))
-                curr_x += img.width + 20
-                if idx == 0: # Linia po zdjęciu Magdy
-                    draw.line([(curr_x-10, 0), (curr_x-10, target_h)], fill="black", width=6)
+            if valid_images:
+                target_h = 400
+                resized = []
+                for img in valid_images:
+                    new_w = int(target_h * (img.width / img.height))
+                    resized.append(img.resize((new_w, target_h)))
+                
+                total_w = sum(i.width for i in resized) + (20 * (len(resized)-1))
+                collage = Image.new('RGB', (total_w, target_h), (255, 255, 255))
+                curr_x = 0
+                draw = ImageDraw.Draw(collage)
+                
+                for idx, img in enumerate(resized):
+                    collage.paste(img, (curr_x, 0))
+                    curr_x += img.width + 20
+                    if idx == 0 and len(resized) > 1: # Linia po zdjęciu Magdy
+                        draw.line([(curr_x-10, 0), (curr_x-10, target_h)], fill="black", width=6)
 
-            st.image(collage, caption="Twój zestaw do przymiarki", use_container_width=True)
-            
-            buf = io.BytesIO()
-            collage.save(buf, format="JPEG")
-            st.download_button("📥 Pobierz Kolarz", buf.getvalue(), "zestaw.jpg", "image/jpeg")
+                st.image(collage, caption="Twój zestaw do przymiarki", use_container_width=True)
+                
+                buf = io.BytesIO()
+                collage.save(buf, format="JPEG")
+                st.download_button("📥 Pobierz Kolarz", buf.getvalue(), "zestaw.jpg", "image/jpeg")
 
-            prompt_final = f"Użyj modelu Nano Banana 2. Na zdjęciu po lewej jestem ja, po prawej ubrania. Ubierz mnie w nie:\n{vto_desc}"
-            st.code(prompt_final)
+                prompt_final = f"Użyj modelu Nano Banana 2. Na zdjęciu po lewej jestem ja, po prawej ubrania. Ubierz mnie w nie:\n{vto_desc}"
+                st.code(prompt_final)

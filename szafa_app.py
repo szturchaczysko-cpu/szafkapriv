@@ -26,14 +26,13 @@ def init_services():
     creds_dict = json.loads(st.secrets["FIREBASE_CREDS"])
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     
-    # Inicjalizacja z podaniem nazwy bucketa Storage (domyślnie to project_id.appspot.com)
     if not firebase_admin._apps:
         cred = credentials.Certificate(creds_dict)
         firebase_admin.initialize_app(cred, {
             'storageBucket': f"{st.secrets.get('GCP_PROJECT_ID')}.appspot.com"
         })
     db = firestore.client()
-    bucket = storage.bucket() # Magazyn plików
+    bucket = storage.bucket() 
 
     vertex_creds = service_account.Credentials.from_service_account_info(creds_dict)
     vertexai.init(
@@ -73,8 +72,38 @@ tab_przeglad, tab_dodaj, tab_dobierz = st.tabs([
 # ZAKŁADKA 1: PRZEGLĄD
 # ==========================================
 with tab_przeglad:
-    st.subheader("Wszystkie ubrania w bazie")
+    col_header, col_nuke = st.columns([3, 1])
+    with col_header:
+        st.subheader("Wszystkie ubrania w bazie")
     
+    # --- PRZYCISK NUKLEARNY (USUŃ WSZYSTKO) ---
+    with st.expander("⚠️ Opcje zaawansowane"):
+        st.warning("Ta akcja nieodwracalnie usunie WSZYSTKIE ubrania z bazy danych i chmury!")
+        if st.button("🚨 Wyczyść całą szafę", type="primary"):
+            with st.spinner("Usuwanie wszystkich ubrań i zdjęć... To może chwilę potrwać."):
+                all_items = db.collection("wardrobe_items").stream()
+                for doc in all_items:
+                    item_data = doc.to_dict()
+                    image_url = item_data.get("image_path", "")
+                    
+                    # 1. Usunięcie zdjęcia z chmury Firebase
+                    if image_url.startswith("http"):
+                        try:
+                            blob_name = image_url.split("?")[0].split("/")[-1]
+                            blob = bucket.blob(f"wardrobe_images/{blob_name}")
+                            blob.delete()
+                        except:
+                            pass
+                    
+                    # 2. Usunięcie wpisu z Firestore
+                    db.collection("wardrobe_items").document(doc.id).delete()
+                
+                st.success("Szafa została całkowicie wyczyszczona!")
+                time.sleep(1.5)
+                st.rerun()
+    
+    st.markdown("---")
+
     items_ref = db.collection("wardrobe_items").stream()
     items = [{"id": doc.id, **doc.to_dict()} for doc in items_ref]
     
@@ -86,7 +115,6 @@ with tab_przeglad:
             with cols[i % 4]:
                 st.markdown(f"**ID: {item['id']}** | {item.get('kategoria', 'Ubranie')}")
                 
-                # Zmiana: Obsługa wyświetlania zdjęć z chmury z weryfikacją starych, pustych wpisów
                 image_url = item.get("image_path", "")
                 if image_url.startswith("http"):
                     st.image(image_url, use_container_width=True)
@@ -104,10 +132,8 @@ with tab_przeglad:
                 
                 if st.button("🗑️ Usuń", key=f"del_{item['id']}"):
                     db.collection("wardrobe_items").document(item['id']).delete()
-                    # Próba usunięcia pliku z chmury, jeśli to URL
                     if image_url.startswith("http"):
                         try:
-                            # Wyciągamy ścieżkę z URL podpisanego
                             blob_name = image_url.split("?")[0].split("/")[-1]
                             blob = bucket.blob(f"wardrobe_images/{blob_name}")
                             blob.delete()
@@ -131,14 +157,10 @@ with tab_dodaj:
                         file_id = str(uuid.uuid4())[:8]
                         file_ext = uploaded_file.name.split('.')[-1]
                         
-                        # --- ZMIANA: ZAPISUJEMY FIZYCZNIE DO CHMURY, NIE NA DYSK ---
                         blob = bucket.blob(f"wardrobe_images/{file_id}.{file_ext}")
                         blob.upload_from_string(uploaded_file.getvalue(), content_type=uploaded_file.type)
-                        
-                        # Generujemy bezpieczny link ważny przez 100 lat
                         image_url = blob.generate_signed_url(expiration=datetime.timedelta(days=36500))
                             
-                        # Analiza AI
                         model = GenerativeModel("gemini-2.5-flash")
                         image_part = Part.from_data(uploaded_file.getvalue(), mime_type=uploaded_file.type)
                         
@@ -160,7 +182,6 @@ with tab_dodaj:
                         json_str = response.text.replace("```json", "").replace("```", "").strip()
                         tags = json.loads(json_str)
                         
-                        # Zapis do Firestore z adresem URL
                         db.collection("wardrobe_items").document(file_id).set({
                             "kategoria": tags.get("kategoria"),
                             "typ_szczegolowy": tags.get("typ_szczegolowy"),
@@ -169,7 +190,7 @@ with tab_dodaj:
                             "detale": tags.get("detale"),
                             "styl_sezon": tags.get("styl_sezon"),
                             "opis_dla_vto": tags.get("opis_dla_vto"),
-                            "image_path": image_url # <-- TUTAJ ZAPISUJEMY LINK Z FIREBASE
+                            "image_path": image_url 
                         })
                         
                         st.toast(f"✅ Dodano pomyślnie {uploaded_file.name}! Wykryto: {tags.get('typ_szczegolowy')}")
@@ -249,14 +270,12 @@ with tab_dobierz:
             except Exception as e:
                 st.error(f"Nie mogłem wczytać zdjęcia bazowego z dysku: {e}")
 
-            # --- ZMIANA: POBIERANIE ZDJĘĆ Z URL DO KOLARZU ---
             for i, item in enumerate(st.session_state.selected_items):
                 with cols[i]:
                     image_url = item.get("image_path", "")
                     if image_url.startswith("http"):
                         st.image(image_url, width=150)
                         try:
-                            # Pobieramy obraz z chmury do pamięci
                             response = requests.get(image_url)
                             img_pil = Image.open(io.BytesIO(response.content)).convert("RGB")
                             valid_images.append(img_pil)

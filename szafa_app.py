@@ -27,7 +27,6 @@ def init_services():
     creds_dict = json.loads(st.secrets["FIREBASE_CREDS"])
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     
-    # Inicjalizacja samej aplikacji bez podawania domyślnego magazynu
     if not firebase_admin._apps:
         cred = credentials.Certificate(creds_dict)
         firebase_admin.initialize_app(cred)
@@ -35,7 +34,6 @@ def init_services():
     db = firestore.client()
     
     # --- PANCERNE WSKAZANIE MAGAZYNU ---
-    # Wymuszamy połączenie z konkretnym zasobnikiem, ignorując stary cache!
     bucket = storage.bucket("szafa-magdy-zdjecia-2026") 
 
     vertex_creds = service_account.Credentials.from_service_account_info(creds_dict)
@@ -80,7 +78,6 @@ with tab_przeglad:
     with col_header:
         st.subheader("Wszystkie ubrania w bazie")
     
-    # OPCJE ZAAWANSOWANE (USUWANIE WSZYSTKIEGO)
     with st.expander("⚠️ Opcje zaawansowane"):
         st.warning("Ta akcja nieodwracalnie usunie WSZYSTKIE ubrania z bazy danych i chmury!")
         if st.button("🚨 Wyczyść całą szafę", type="primary"):
@@ -123,9 +120,10 @@ with tab_przeglad:
                     st.error("⚠️ Brak obrazu w chmurze.")
                 
                 st.caption(f"**Typ:** {item.get('typ_szczegolowy', '')}")
-                st.caption(f"**Wygląd:** {item.get('kolor_wzor', '')}")
+                st.caption(f"**Plik:** {item.get('file_name', 'Brak nazwy')}")
                 
                 with st.expander("🛠️ Detale AI"):
+                    st.write(f"**Kolor:** {item.get('kolor_wzor', '')}")
                     st.write(f"**Materiał:** {item.get('material_faktura', '')}")
                     st.write(f"**Detale:** {item.get('detale', '')}")
                     st.code(item.get('opis_dla_vto', ''))
@@ -143,39 +141,48 @@ with tab_przeglad:
                 st.divider()
 
 # ==========================================
-# ZAKŁADKA 2: DODAJ (ZAPIS W CHMURZE Z ANTY-TIMEOUTEM)
+# ZAKŁADKA 2: DODAJ (Z BLOKADĄ DUPLIKATÓW I ZAPISAMI INDYWIDUALNYMI)
 # ==========================================
 with tab_dodaj:
     st.subheader("Dodaj nowe ubrania")
-    uploaded_files = st.file_uploader("Wgraj zdjęcia:", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Wgraj zdjęcia (system pominie duplikaty nazw):", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
     
     if uploaded_files:
-        if st.button("🤖 Rozpoznaj i zapisz", type="primary"):
+        if st.button("🤖 Rozpocznaj analizę i dodawanie", type="primary"):
             
-            # --- ZMIANA: System zapobiegania timeoutom ---
+            # --- POBRANIE ISTNIEJĄCYCH NAZW Z BAZY ---
+            existing_ref = db.collection("wardrobe_items").stream()
+            existing_names = {doc.to_dict().get('file_name') for doc in existing_ref if doc.to_dict().get('file_name')}
+            
             total_files = len(uploaded_files)
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             for i, uploaded_file in enumerate(uploaded_files):
-                # Aktualizacja interfejsu przy każdym zdjęciu wymusza podtrzymanie połączenia z serwerem
-                status_text.info(f"⏳ Przetwarzam zdjęcie {i+1} z {total_files}: {uploaded_file.name}...")
+                current_name = uploaded_file.name
+                
+                # 1. SPRAWDZENIE DUPLIKATU
+                if current_name in existing_names:
+                    st.warning(f"Pomijam: {current_name} - nazwa się powtarza w bazie.")
+                    progress_bar.progress((i + 1) / total_files)
+                    continue
+
+                status_text.info(f"⏳ Analiza {i+1}/{total_files}: {current_name}...")
                 
                 try:
                     file_id = str(uuid.uuid4())[:8]
-                    file_ext = uploaded_file.name.split('.')[-1]
+                    file_ext = current_name.split('.')[-1]
                     
-                    # Upload do Google Cloud Storage
+                    # 2. Upload do Storage
                     new_blob = bucket.blob(f"wardrobe_images/{file_id}.{file_ext}")
                     new_blob.upload_from_string(uploaded_file.getvalue(), content_type=uploaded_file.type)
                     image_url = new_blob.generate_signed_url(expiration=datetime.timedelta(days=36500))
                         
-                    # Analiza Gemini
+                    # 3. Analiza Gemini z Retry
                     model = GenerativeModel("gemini-2.5-flash")
                     image_part = Part.from_data(uploaded_file.getvalue(), mime_type=uploaded_file.type)
                     
-                    prompt = """
-                    Zwróć WYŁĄCZNIE czysty JSON:
+                    prompt = """Zwróć WYŁĄCZNIE czysty JSON:
                     {
                         "kategoria": "Góra/Dół/Buty/Sukienka/Okrycie",
                         "typ_szczegolowy": "np. koszula jeansowa",
@@ -184,29 +191,46 @@ with tab_dodaj:
                         "detale": "np. perłowe napy",
                         "styl_sezon": "Casual",
                         "opis_dla_vto": "Detailed English description for image generation (25 words)."
-                    }
-                    """
-                    response = model.generate_content([image_part, prompt])
-                    tags = json.loads(response.text.replace("```json", "").replace("```", "").strip())
+                    }"""
                     
-                    db.collection("wardrobe_items").document(file_id).set({
-                        **tags,
-                        "image_path": image_url 
-                    })
+                    max_retries = 3
+                    tags = None
                     
-                    st.toast(f"✅ Dodano pomyślnie: {tags.get('typ_szczegolowy')}")
+                    for attempt in range(max_retries):
+                        try:
+                            response = model.generate_content([image_part, prompt])
+                            tags = json.loads(response.text.replace("```json", "").replace("```", "").strip())
+                            break
+                        except Exception as ai_err:
+                            if attempt < max_retries - 1:
+                                wait = 10 * (attempt + 1)
+                                status_text.warning(f"Serwer zajęty. Czekam {wait}s...")
+                                time.sleep(wait)
+                            else:
+                                raise ai_err
+                    
+                    # 4. NATYCHMIASTOWY ZAPIS DO BAZY
+                    if tags:
+                        db.collection("wardrobe_items").document(file_id).set({
+                            **tags,
+                            "image_path": image_url,
+                            "file_name": current_name # Zapisujemy nazwę do przyszłych sprawdzeń
+                        })
+                        st.toast(f"✅ Zapisano: {tags.get('typ_szczegolowy')}")
+                        existing_names.add(current_name) # Dodajemy do lokalnej listy, żeby nie dublować w tej samej sesji
                     
                 except Exception as e:
-                    st.error(f"Błąd przy pliku {uploaded_file.name}: {e}")
+                    st.error(f"❌ Błąd przy {current_name}: {e}")
                 
-                # Aktualizacja paska postępu
                 progress_bar.progress((i + 1) / total_files)
                 
-                # Bufor czasowy dla Vertex AI - zapobiega błędowi "Too Many Requests" i ucinaniu połączeń
-                time.sleep(2) 
+                # --- RUTYNOWA PRZERWA (15 SEKUND) ---
+                if i < total_files - 1:
+                    status_text.info(f"☕ Chwila przerwy dla serwera (15s)... Kolejne zdjęcie za moment.")
+                    time.sleep(15) 
                 
-            status_text.success("🎉 Wszystkie zdjęcia zostały pomyślnie przeanalizowane i zapisane!")
-            time.sleep(2)
+            status_text.success("🎉 Gotowe! Odświeżam szafę...")
+            time.sleep(1)
             st.rerun()
 
 # ==========================================
@@ -275,15 +299,15 @@ with tab_dobierz:
                     new_w = int(target_h * (img.width / img.height))
                     resized.append(img.resize((new_w, target_h)))
                 
-                total_w = sum(i.width for i in resized) + (20 * (len(resized)-1))
-                collage = Image.new('RGB', (total_w, target_h), (255, 255, 255))
+                total_w_calc = sum(i.width for i in resized) + (20 * (len(resized)-1))
+                collage = Image.new('RGB', (total_w_calc, target_h), (255, 255, 255))
                 curr_x = 0
                 draw = ImageDraw.Draw(collage)
                 
                 for idx, img in enumerate(resized):
                     collage.paste(img, (curr_x, 0))
                     curr_x += img.width + 20
-                    if idx == 0 and len(resized) > 1: # Linia po zdjęciu Magdy
+                    if idx == 0 and len(resized) > 1:
                         draw.line([(curr_x-10, 0), (curr_x-10, target_h)], fill="black", width=6)
 
                 st.image(collage, caption="Twój zestaw do przymiarki", use_container_width=True)

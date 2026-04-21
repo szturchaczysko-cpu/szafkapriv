@@ -143,7 +143,7 @@ with tab_przeglad:
                 st.divider()
 
 # ==========================================
-# ZAKŁADKA 2: DODAJ (ZAPIS W CHMURZE)
+# ZAKŁADKA 2: DODAJ (ZAPIS W CHMURZE Z ANTY-TIMEOUTEM)
 # ==========================================
 with tab_dodaj:
     st.subheader("Dodaj nowe ubrania")
@@ -151,45 +151,62 @@ with tab_dodaj:
     
     if uploaded_files:
         if st.button("🤖 Rozpoznaj i zapisz", type="primary"):
-            for uploaded_file in uploaded_files:
-                with st.spinner(f"Analiza: {uploaded_file.name}..."):
-                    try:
-                        file_id = str(uuid.uuid4())[:8]
-                        file_ext = uploaded_file.name.split('.')[-1]
+            
+            # --- ZMIANA: System zapobiegania timeoutom ---
+            total_files = len(uploaded_files)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for i, uploaded_file in enumerate(uploaded_files):
+                # Aktualizacja interfejsu przy każdym zdjęciu wymusza podtrzymanie połączenia z serwerem
+                status_text.info(f"⏳ Przetwarzam zdjęcie {i+1} z {total_files}: {uploaded_file.name}...")
+                
+                try:
+                    file_id = str(uuid.uuid4())[:8]
+                    file_ext = uploaded_file.name.split('.')[-1]
+                    
+                    # Upload do Google Cloud Storage
+                    new_blob = bucket.blob(f"wardrobe_images/{file_id}.{file_ext}")
+                    new_blob.upload_from_string(uploaded_file.getvalue(), content_type=uploaded_file.type)
+                    image_url = new_blob.generate_signed_url(expiration=datetime.timedelta(days=36500))
                         
-                        # Upload do Google Cloud Storage
-                        new_blob = bucket.blob(f"wardrobe_images/{file_id}.{file_ext}")
-                        new_blob.upload_from_string(uploaded_file.getvalue(), content_type=uploaded_file.type)
-                        # Link ważny 100 lat
-                        image_url = new_blob.generate_signed_url(expiration=datetime.timedelta(days=36500))
-                            
-                        # Analiza Gemini
-                        model = GenerativeModel("gemini-2.5-flash")
-                        image_part = Part.from_data(uploaded_file.getvalue(), mime_type=uploaded_file.type)
-                        
-                        prompt = """
-                        Zwróć WYŁĄCZNIE czysty JSON:
-                        {
-                            "kategoria": "Góra/Dół/Buty/Sukienka/Okrycie",
-                            "typ_szczegolowy": "np. koszula jeansowa",
-                            "kolor_wzor": "np. jasnoniebieski jeans",
-                            "material_faktura": "np. miękki denim",
-                            "detale": "np. perłowe napy",
-                            "styl_sezon": "Casual",
-                            "opis_dla_vto": "Detailed English description for image generation (25 words)."
-                        }
-                        """
-                        response = model.generate_content([image_part, prompt])
-                        tags = json.loads(response.text.replace("```json", "").replace("```", "").strip())
-                        
-                        db.collection("wardrobe_items").document(file_id).set({
-                            **tags,
-                            "image_path": image_url 
-                        })
-                        st.toast(f"✅ Dodano: {tags.get('typ_szczegolowy')}")
-                        
-                    except Exception as e:
-                        st.error(f"Błąd: {e}")
+                    # Analiza Gemini
+                    model = GenerativeModel("gemini-2.5-flash")
+                    image_part = Part.from_data(uploaded_file.getvalue(), mime_type=uploaded_file.type)
+                    
+                    prompt = """
+                    Zwróć WYŁĄCZNIE czysty JSON:
+                    {
+                        "kategoria": "Góra/Dół/Buty/Sukienka/Okrycie",
+                        "typ_szczegolowy": "np. koszula jeansowa",
+                        "kolor_wzor": "np. jasnoniebieski jeans",
+                        "material_faktura": "np. miękki denim",
+                        "detale": "np. perłowe napy",
+                        "styl_sezon": "Casual",
+                        "opis_dla_vto": "Detailed English description for image generation (25 words)."
+                    }
+                    """
+                    response = model.generate_content([image_part, prompt])
+                    tags = json.loads(response.text.replace("```json", "").replace("```", "").strip())
+                    
+                    db.collection("wardrobe_items").document(file_id).set({
+                        **tags,
+                        "image_path": image_url 
+                    })
+                    
+                    st.toast(f"✅ Dodano pomyślnie: {tags.get('typ_szczegolowy')}")
+                    
+                except Exception as e:
+                    st.error(f"Błąd przy pliku {uploaded_file.name}: {e}")
+                
+                # Aktualizacja paska postępu
+                progress_bar.progress((i + 1) / total_files)
+                
+                # Bufor czasowy dla Vertex AI - zapobiega błędowi "Too Many Requests" i ucinaniu połączeń
+                time.sleep(2) 
+                
+            status_text.success("🎉 Wszystkie zdjęcia zostały pomyślnie przeanalizowane i zapisane!")
+            time.sleep(2)
             st.rerun()
 
 # ==========================================
